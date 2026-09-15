@@ -1,0 +1,178 @@
+services:
+  namenode:
+    image: apache/hadoop:3.4.2
+    hostname: namenode
+    user: root
+    command: ["/opt/hadoop/start-hadoop.sh", "namenode"]
+    volumes:
+      - ./namenode_data:/opt/hadoop/dfs/name
+      - ./hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./hadoop/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - ./hadoop/start-hadoop.sh:/opt/hadoop/start-hadoop.sh:ro
+      - ./data:/course-data:ro
+    ports: ["9870:9870","8020:8020"]
+    networks: [bigdata]
+    profiles: ["hdfs","spark","streaming","kafka","all"]
+
+  datanode1:
+    image: apache/hadoop:3.4.2
+    hostname: datanode1
+    user: root
+    command: ["/opt/hadoop/start-hadoop.sh", "datanode"]
+    volumes:
+      - ./datanode1_data:/opt/hadoop/dfs/data
+      - ./hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./hadoop/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - ./hadoop/start-hadoop.sh:/opt/hadoop/start-hadoop.sh:ro
+    networks: [bigdata]
+    profiles: ["hdfs","spark","streaming","kafka","all"]
+
+  datanode2:
+    image: apache/hadoop:3.4.2
+    hostname: datanode2
+    user: root
+    command: ["/opt/hadoop/start-hadoop.sh", "datanode"]
+    volumes:
+      - ./datanode2_data:/opt/hadoop/dfs/data
+      - ./hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./hadoop/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - ./hadoop/start-hadoop.sh:/opt/hadoop/start-hadoop.sh:ro
+    networks: [bigdata]
+    profiles: ["hdfs","spark","streaming","kafka","all"]
+
+  spark-master:
+    image: apache/spark:4.0.1
+    hostname: spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    volumes:
+      - ./spark/jobs:/opt/spark/jobs:ro
+      - ./data:/course-data:ro
+      - ./spark_packages:/opt/spark/packages
+    ports: ["8080:8080","7077:7077"]
+    networks: [bigdata]
+    profiles: ["spark","streaming","kafka","all"]
+
+  spark-worker1:
+    image: apache/spark:4.0.1
+    hostname: spark-worker1
+    command: [
+      "/opt/spark/bin/spark-class",
+      "org.apache.spark.deploy.worker.Worker",
+      "spark://spark-master:7077"
+    ]
+    depends_on: [spark-master]
+    volumes:
+      - ./spark/jobs:/opt/spark/jobs:ro
+      - ./data:/course-data:ro
+      - ./spark_packages:/opt/spark/packages
+    networks: [bigdata]
+    profiles: ["spark","streaming","kafka","all"]
+
+  spark-worker2:
+    image: apache/spark:4.0.1
+    hostname: spark-worker2
+    command: [
+      "/opt/spark/bin/spark-class",
+      "org.apache.spark.deploy.worker.Worker",
+      "spark://spark-master:7077"
+    ]
+    depends_on: [spark-master]
+    volumes:
+      - ./spark/jobs:/opt/spark/jobs:ro
+      - ./data:/course-data:ro
+      - ./spark_packages:/opt/spark/packages
+    networks: [bigdata]
+    profiles: ["spark","streaming","kafka","all"]
+
+  kafka:
+    image: apache/kafka:4.0.2
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_LOG_RETENTION_HOURS: 24
+    volumes: [kafka_data:/var/lib/kafka/data]
+    ports: ["29092:29092"]
+    networks: [bigdata]
+    profiles: ["kafka","all"]
+
+  kafka-init:
+    image: apache/kafka:4.0.2
+    depends_on: [kafka]
+    entrypoint: ["/bin/sh","-c"]
+    command: >
+      "until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list >/dev/null 2>&1;
+      do sleep 2; done;
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092
+      --create --if-not-exists --topic sensors --partitions 3 --replication-factor 1;
+      echo 'Kafka topic sensors ready';"
+    networks: [bigdata]
+    profiles: ["kafka","all"]
+
+  producer:
+    image: python:3.12-slim
+    depends_on: [kafka-init]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: sensors
+      EVENTS_PER_SECOND: 2
+    entrypoint: ["/bin/bash","-lc"]
+    command: >
+      "pip install --no-cache-dir kafka-python-ng==2.2.2 && sleep 15 && python /app/sensor_generator.py"
+    volumes:
+      - ./producer:/app:ro
+    networks: [bigdata]
+    profiles: ["kafka","all"]
+  # producer:
+    # build: ./producer
+    # hostname: producer
+    # depends_on: [kafka-init]
+    # environment:
+      # KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      # KAFKA_TOPIC: sensors
+      # EVENTS_PER_SECOND: 2
+    # networks: [bigdata]
+    # profiles: ["kafka","all"]
+
+  spark-kafka-init:
+    image: apache/spark:4.0.1
+    user: root
+    entrypoint: ["/bin/bash","-lc"]
+    command: >
+      "mkdir -p /opt/spark/packages &&
+      cd /opt/spark/packages &&
+      if [ ! -f spark-sql-kafka-0-10_2.13-4.0.1.jar ]; then
+      curl -fL -o spark-sql-kafka-0-10_2.13-4.0.1.jar
+      https://repo1.maven.org/maven2/org/apache/spark/spark-sql-kafka-0-10_2.13/4.0.1/spark-sql-kafka-0-10_2.13-4.0.1.jar;
+      fi"
+    volumes: [spark_packages:/opt/spark/packages]
+    profiles: ["kafka","all"]
+
+  jupyter:
+    image: quay.io/jupyter/pyspark-notebook:spark-4.0.1
+    ports: ["8888:8888"]
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./data:/home/jovyan/data
+    networks: [bigdata]
+    profiles: ["optional","all"]
+
+networks:
+  bigdata:
+    driver: bridge
+
+volumes:
+  namenode_data:
+  datanode1_data:
+  datanode2_data:
+  kafka_data:
+  spark_packages:
+  producer:
